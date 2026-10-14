@@ -545,3 +545,97 @@ If something fails, work through these checks in order. If a lower-level check f
 
 ---
 
+
+### Phase 12 -- Why HTTP is a problem (packet interception)
+ 
+Everything up to this point works over HTTP, which means every request and response travels in plaintext. Anyone positioned on the same network segment can read it. This phase demonstrates the problem two ways: inside Packet Tracer using Simulation Mode, and on a real machine using Wireshark.
+ 
+#### 12.1 What "plaintext" actually means
+ 
+When PC0 browses `http://internalweb.com`, the HTTP GET request, the server's response, and any form data the user submits all travel as readable text inside TCP segments. There is no encryption. A switch forwards frames only to the correct port, which limits casual eavesdropping on a switched network, but an attacker with access to the wire, a span/mirror port, ARP poisoning, or a position on the same wifi segment can capture and read everything.
+ 
+HTTPS wraps that same HTTP conversation inside a TLS tunnel. The TCP segments still cross the network, but their payload is encrypted. An interceptor sees the TLS handshake and ciphertext, nothing more.
+
+#### 12.2 Inspecting HTTP packets in Packet Tracer (Simulation Mode)
+ 
+Packet Tracer has a built-in packet inspector. It does not use Wireshark; instead, it pauses the network and lets you step through each packet one at a time.
+ 
+1. At the bottom-right of the Packet Tracer window, click the **Simulation** tab (the stopwatch icon) to switch from Realtime mode.
+2. In the Event List Filters, make sure HTTP is checked (click Edit Filters > IPv4 > HTTP if it is not visible).
+3. On PC0, open Desktop > Web Browser and type `http://internalweb.com`. Click Go.
+4. Back in the Simulation panel, click **Capture / Forward** to step through each event. You will see DNS packets first (the name resolution), then TCP handshake packets (SYN, SYN-ACK, ACK), then the HTTP packets.
+5. Click on any HTTP packet in the event list. A window opens showing the packet at each OSI layer.
+6. Expand the Layer 7 (Application) section. The HTTP GET request and the server's HTML response are fully readable.
+This is the equivalent of what an attacker sees when intercepting HTTP traffic: the full URL, headers, and body content, all in the clear.
+ 
+![Simulation Mode HTTP packet inspection](images/sim-mode-http.png)
+ 
+#### 12.3 Intercepting real HTTP traffic with Wireshark
+ 
+Packet Tracer's virtual network is self-contained. Its packets never touch your host machine's network interfaces, so Wireshark on your computer cannot see them. To demonstrate interception with Wireshark, we use real HTTP traffic against a public test endpoint.
+ 
+**Setup:**
+ 
+Wireshark needs permission to capture on your network interfaces. On Arch Linux (and most distributions), add your user to the `wireshark` group and log out/in:
+ 
+```bash
+sudo usermod -aG wireshark $(whoami)
+```
+ 
+After logging back in, open Wireshark. You should see your real network interfaces listed (names like `enp3s0`, `wlp2s0`, or similar). Select the one you are using for internet access and start a capture.
+ 
+**Sending a plaintext HTTP POST:**
+ 
+Open a terminal and send a POST request over plain HTTP:
+ 
+```bash
+curl --http1.1 http://httpbin.org/post -X POST -d "username=testuser&password=FAKE-DEMO-123"
+```
+ 
+`curl` is a real HTTP client, not a simulation. It sends genuine TCP packets through your network stack, the same packets a browser would send. The `--http1.1` flag forces HTTP/1.1, which is plaintext and easy to read in Wireshark (HTTP/2 uses binary framing and is harder to inspect even before encryption).
+ 
+`httpbin.org` is a public test service that accepts requests and echoes them back. The `/post` endpoint mirrors whatever data you send so you can verify what the server received.
+ 
+**Reading the captured POST in Wireshark:**
+ 
+In Wireshark's display filter bar, type:
+ 
+```
+http.request.method == "POST"
+```
+ 
+![Wireshark capturing the HTTP POST request](images/wireshark-http-post.png)
+ 
+You should see your POST request. Click on it, then right-click and select **Follow > TCP Stream**. The stream window shows the entire HTTP conversation in readable text:
+ 
+![TCP stream showing plaintext credentials](images/wireshark-http-stream.png)
+ 
+Everything is exposed: the request method, the host, the headers, and the POST body with `username=testuser&password=FAKE-DEMO-123` in full cleartext. On a shared or compromised network, anyone capturing packets would see these credentials.
+ 
+**Sending the same request over HTTPS:**
+ 
+Now send the same data over HTTPS:
+ 
+```bash
+curl --http1.1 https://httpbin.org/post -X POST -d "username=testuser&password=FAKE-DEMO-123"
+```
+ 
+In Wireshark, change the display filter to:
+ 
+```
+tls
+```
+ 
+Note: the filter `tls.request.method == "POST"` does not exist and Wireshark will reject it (the filter bar turns red). TLS is an encryption layer, not an application protocol. It has no concept of request methods. It just wraps everything in ciphertext. The `tls` filter shows TLS handshake and encrypted data packets.
+ 
+![Wireshark showing TLS encrypted traffic](images/wireshark-tls.png)
+ 
+You will see the TLS handshake (ClientHello, ServerHello, certificate exchange) and then Application Data packets. Follow the TCP stream for these packets and you get unreadable ciphertext. The username and password are in there somewhere, but they are encrypted. No amount of filtering will extract them.
+ 
+#### 12.4 The real-world scenario
+ 
+The comparison above is exactly what makes open wifi networks dangerous. The attack is called **passive sniffing**: an attacker on the same network puts their adapter into promiscuous mode (capturing all traffic on the segment, not just packets addressed to their MAC), opens Wireshark, and filters for HTTP. Every plaintext request from anyone on that network is readable, including login forms, session cookies, and personal data.
+ 
+A more aggressive variant is the **evil twin** attack: the attacker creates a wifi hotspot with the same name as a legitimate one, often with a stronger signal. People connect to it by mistake, and all their traffic routes through the attacker's machine.
+ 
+HTTPS does not hide *that* a connection happened (the attacker can still see you connected to `httpbin.org`), but it makes the content unreadable. That is why browsers now warn you when a site uses plain HTTP, and why every login page, payment form, and API endpoint should use HTTPS.
